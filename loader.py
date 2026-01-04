@@ -22,8 +22,9 @@ logger = logging.getLogger(__name__)
 
 
 class SDNQLinear(torch.nn.Module):
-    def __init__(self):
+    def __init__(self, compute_dtype=torch.bfloat16):
         super().__init__()
+        self.compute_dtype = compute_dtype
 
     @torch.no_grad()
     def load_state_dict(self, state_dict):
@@ -39,7 +40,7 @@ class SDNQLinear(torch.nn.Module):
         svd_rank = self.svd_down.shape[1]
         # not sure about the inputs here
         self.sdnq_dequantizer = SDNQDequantizer(
-            torch.bfloat16,
+            self.compute_dtype,
             (in_features, out_features),
             (in_features, out_features),
             (in_features, 1),
@@ -73,7 +74,7 @@ def replace_linear(model, new_sd, compute_dtype, prefix=""):
             }
             sd = {k: v.cuda() if hasattr(v, "cuda") else v for k, v in sd.items()}
 
-            sdnq_linear = SDNQLinear()
+            sdnq_linear = SDNQLinear(compute_dtype)
             sdnq_linear.load_state_dict(sd)
             setattr(model, name, sdnq_linear)
             torch.cuda.empty_cache()
