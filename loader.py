@@ -23,7 +23,7 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 
-def replace_linear(model, new_sd, compute_dtype, int8_matmul, prefix=""):
+def replace_linear(model, new_sd, compute_dtype, int8_matmul, fused_kernel, prefix=""):
     for name, module in model.named_children():
         base = f"{prefix}.{name}"
         if (base + ".svd_up") in new_sd:
@@ -33,7 +33,7 @@ def replace_linear(model, new_sd, compute_dtype, int8_matmul, prefix=""):
             nbits = new_sd[base+".nbits"] = new_sd.get(base+"nbits", torch.tensor((4,)))
             new_sd.pop(base + ".shape", None)
             bias = (base + ".bias") in new_sd
-            sdnq_linear = HQQSVDLinear(in_features, out_features, svd_rank, n_groups, nbits.item(), int8_matmul, bias, "cuda", dtype=compute_dtype)
+            sdnq_linear = HQQSVDLinear(in_features, out_features, svd_rank, n_groups, nbits.item(), int8_matmul, bias, "cuda", dtype=compute_dtype, use_fused_kernel=fused_kernel)
             setattr(model, name, sdnq_linear)
             torch.cuda.empty_cache()
         else:
@@ -43,7 +43,7 @@ def replace_linear(model, new_sd, compute_dtype, int8_matmul, prefix=""):
                 sub_prefix = name
             else:
                 sub_prefix = prefix + "." + name
-            replace_linear(module, new_sd, compute_dtype, int8_matmul, sub_prefix)
+            replace_linear(module, new_sd, compute_dtype, int8_matmul, fused_kernel, sub_prefix)
     return model
 
 
@@ -94,7 +94,7 @@ class CustomPatcher(comfy.model_patcher.ModelPatcher):
                     module.loras = {}
         return super().unpatch_model(device_to=device_to, unpatch_weights=unpatch_weights)
 
-def load_diffusion_model_state_dict(sd, int8_matmul, model_options={}, metadata=None):
+def load_diffusion_model_state_dict(sd, int8_matmul, fused_kernel=True, model_options={}, metadata=None):
     """
     Loads a UNet diffusion model from a state dictionary, supporting both diffusers and regular formats.
 
@@ -188,7 +188,7 @@ def load_diffusion_model_state_dict(sd, int8_matmul, model_options={}, metadata=
         model_config.optimizations["fp8"] = True
 
     model = model_config.get_model(new_sd, "")
-    model = replace_linear(model, new_sd, unet_dtype, int8_matmul)
+    model = replace_linear(model, new_sd, unet_dtype, int8_matmul, fused_kernel)
     model = model.to(offload_device)
     model.load_model_weights(new_sd, "")
     left_over = sd.keys()
@@ -206,11 +206,9 @@ def model_detection_error_hint(path, state_dict):
     return ""
 
 
-def load_diffusion_model(unet_path, int8_matmul, model_options={}):
+def load_diffusion_model(unet_path, int8_matmul, fused_kernel=True, model_options={}):
     sd, metadata = comfy.utils.load_torch_file(unet_path, return_metadata=True)
-    model = load_diffusion_model_state_dict(
-        sd, int8_matmul, model_options=model_options, metadata=metadata
-    )
+    model = load_diffusion_model_state_dict(sd, int8_matmul, fused_kernel, model_options=model_options, metadata=metadata)
     if model is None:
         logging.error("ERROR UNSUPPORTED DIFFUSION MODEL {}".format(unet_path))
         raise RuntimeError(
@@ -227,7 +225,8 @@ class SDNQLoader:
         return {
             "required": {
                 "unet_name": (folder_paths.get_filename_list("diffusion_models"),),
-                "int8_matmul": ("BOOLEAN", {"default":True})
+                "int8_matmul": ("BOOLEAN", {"default": True}),
+                "fused_kernel": ("BOOLEAN", {"default": True})
             }
         }
 
@@ -236,9 +235,15 @@ class SDNQLoader:
 
     CATEGORY = "SDNQ"
 
-    def load_unet(self, unet_name, int8_matmul:bool=True):
+    def load_unet(self, unet_name, int8_matmul: bool=True, fused_kernel: bool=True):
         unload_all_models()
+        if fused_kernel:
+            logger.info("SDNQ fused_kernel enabled")
         unet_path = folder_paths.get_full_path_or_raise("diffusion_models", unet_name)
-        model = load_diffusion_model(unet_path, int8_matmul)
+        model = load_diffusion_model(unet_path, int8_matmul, fused_kernel)
         return (model,)
+
+
+
+
 
